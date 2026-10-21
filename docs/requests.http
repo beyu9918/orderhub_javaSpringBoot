@@ -1,0 +1,63 @@
+@baseUrl = http://localhost:8080
+@adminToken = replace-with-admin-login-accessToken
+@userToken = replace-with-user-login-accessToken
+@productId = 1
+@orderId = 1
+
+### 1. 管理员登录，密码与环境变量一致
+POST {{baseUrl}}/api/auth/login
+Content-Type: application/json
+
+{"username":"admin","password":"replace-with-a-strong-admin-password"}
+
+### 2. 使用管理员 accessToken 创建商品
+POST {{baseUrl}}/api/admin/products
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{"sku":"KEYBOARD-001","name":"机械键盘","description":"87 键机械键盘","category":"electronics","price":199.00,"active":true,"stock":20}
+
+### 3. 用户注册
+POST {{baseUrl}}/api/auth/register
+Content-Type: application/json
+
+{"username":"alice","password":"Alice-password-123!"}
+
+### 4. 用户登录，将 accessToken 填入 userToken
+POST {{baseUrl}}/api/auth/login
+Content-Type: application/json
+
+{"username":"alice","password":"Alice-password-123!"}
+
+### 5. 商品查询
+GET {{baseUrl}}/api/products?page=1&size=20&category=electronics
+
+### 6. 设置购物车商品数量
+PUT {{baseUrl}}/api/cart/items/{{productId}}
+Authorization: Bearer {{userToken}}
+Content-Type: application/json
+
+{"quantity":2}
+
+### 7. 下单（重试使用同一 requestKey，新订单使用新键）
+POST {{baseUrl}}/api/orders
+Authorization: Bearer {{userToken}}
+Content-Type: application/json
+
+{"requestKey":"alice-checkout-0001"}
+
+### 8. 历史订单
+GET {{baseUrl}}/api/orders?page=1&size=20&status=CREATED
+Authorization: Bearer {{userToken}}
+
+### 9. 订单明细
+GET {{baseUrl}}/api/orders/{{orderId}}
+Authorization: Bearer {{userToken}}
+
+### 10. 取消订单
+POST {{baseUrl}}/api/orders/{{orderId}}/cancel
+Authorization: Bearer {{userToken}}
+
+### 11. 查询实时库存
+GET {{baseUrl}}/api/admin/products/{{productId}}/stock
+Authorization: Bearer {{adminToken}}
