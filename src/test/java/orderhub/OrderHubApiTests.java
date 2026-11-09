@@ -41,7 +41,7 @@ class OrderHubApiTests {
         jdbc.update("DELETE FROM order_item");
         jdbc.update("DELETE FROM shop_order");
         jdbc.update("DELETE FROM cart_item");
-        jdbc.update("DELETE FROM inventory");
+        jdbc.update("DELETE FROM legacy_inventory");
         jdbc.update("DELETE FROM product");
         jdbc.update("DELETE FROM app_user WHERE role = 'USER'");
     }
@@ -174,7 +174,7 @@ class OrderHubApiTests {
                 .andExpect(jsonPath("$.paths['/api/orders']").exists());
         mvc.perform(get("/swagger-ui.html")).andExpect(status().is3xxRedirection());
         long product = products.create(input("constraint", "Item", "10", 5)).id();
-        assertThatThrownBy(() -> jdbc.update("UPDATE inventory SET quantity=-1 WHERE product_id=?", product))
+        assertThatThrownBy(() -> jdbc.update("UPDATE legacy_inventory SET quantity=-1 WHERE product_id=?", product))
                 .isInstanceOf(org.springframework.dao.DataIntegrityViolationException.class);
         assertThatThrownBy(() -> jdbc.update("INSERT INTO cart_item(user_id,product_id,quantity) VALUES(999999,?,1)", product))
                 .isInstanceOf(org.springframework.dao.DataIntegrityViolationException.class);

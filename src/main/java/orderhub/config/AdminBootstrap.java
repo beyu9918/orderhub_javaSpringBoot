@@ -11,6 +11,7 @@ import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Component;
 
 @Component
+@org.springframework.boot.autoconfigure.condition.ConditionalOnProperty(name="orderhub.legacy-api.enabled",havingValue="true")
 public class AdminBootstrap implements ApplicationRunner {
     private final UserMapper users;
     private final PasswordEncoder passwords;

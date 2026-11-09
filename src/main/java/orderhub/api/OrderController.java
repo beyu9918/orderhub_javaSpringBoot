@@ -13,6 +13,7 @@ import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.web.bind.annotation.*;
 
 @RestController
+@org.springframework.boot.autoconfigure.condition.ConditionalOnProperty(name="orderhub.legacy-api.enabled",havingValue="true")
 @RequestMapping("/api/orders")
 @Tag(name = "订单")
 public class OrderController {

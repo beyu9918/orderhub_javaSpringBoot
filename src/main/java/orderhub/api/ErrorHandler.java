@@ -14,6 +14,9 @@ import org.springframework.security.access.AccessDeniedException;
 import org.springframework.web.HttpRequestMethodNotSupportedException;
 import org.springframework.web.HttpMediaTypeNotSupportedException;
 import org.springframework.web.servlet.resource.NoResourceFoundException;
+import org.springframework.web.bind.MissingRequestHeaderException;
+import org.springframework.web.bind.MissingServletRequestParameterException;
+import org.springframework.web.multipart.MaxUploadSizeExceededException;
 
 @RestControllerAdvice
 public class ErrorHandler {
@@ -24,7 +27,7 @@ public class ErrorHandler {
 
     @ExceptionHandler({MethodArgumentNotValidException.class, ConstraintViolationException.class,
             HandlerMethodValidationException.class, MethodArgumentTypeMismatchException.class,
-            HttpMessageNotReadableException.class})
+            HttpMessageNotReadableException.class, MissingRequestHeaderException.class, MissingServletRequestParameterException.class})
     ResponseEntity<ProblemDetail> invalid(Exception ex) {
         return problem(HttpStatus.BAD_REQUEST, "请求参数无效，请检查字段格式、长度和取值范围");
     }
@@ -58,6 +61,11 @@ public class ErrorHandler {
     ResponseEntity<ProblemDetail> unexpected(Exception ex) {
         log.error("Unhandled request failure", ex);
         return problem(HttpStatus.INTERNAL_SERVER_ERROR, "服务器内部错误");
+    }
+
+    @ExceptionHandler(MaxUploadSizeExceededException.class)
+    ResponseEntity<ProblemDetail> upload(MaxUploadSizeExceededException ex) {
+        return problem(HttpStatus.PAYLOAD_TOO_LARGE,"图片不能超过 5 MB");
     }
 
     private ResponseEntity<ProblemDetail> problem(HttpStatus status, String detail) {

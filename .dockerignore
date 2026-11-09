@@ -4,5 +4,6 @@
 .local
 .env
 target
+data
 docs
 *.md

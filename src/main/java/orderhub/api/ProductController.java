@@ -9,6 +9,7 @@ import orderhub.service.ProductService;
 import org.springframework.web.bind.annotation.*;
 
 @RestController
+@org.springframework.boot.autoconfigure.condition.ConditionalOnProperty(name="orderhub.legacy-api.enabled",havingValue="true")
 @RequestMapping("/api/products")
 @Tag(name = "商品")
 @SecurityRequirements

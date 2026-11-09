@@ -30,7 +30,7 @@ public final class Entities {
         public OffsetDateTime createdAt;
     }
 
-    @TableName("inventory")
+    @TableName("legacy_inventory")
     public static class Inventory {
         @TableId(type = IdType.INPUT) public Long productId;
         public Integer quantity;

@@ -1,0 +1,4 @@
+**
+!Dockerfile.jar
+!target/
+!target/orderhub-0.0.1-SNAPSHOT.jar

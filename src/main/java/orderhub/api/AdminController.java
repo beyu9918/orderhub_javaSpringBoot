@@ -12,6 +12,7 @@ import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
 
 @RestController
+@org.springframework.boot.autoconfigure.condition.ConditionalOnProperty(name="orderhub.legacy-api.enabled",havingValue="true")
 @RequestMapping("/api/admin/products")
 @PreAuthorize("hasRole('ADMIN')")
 @Tag(name = "商品与库存管理（管理员）")

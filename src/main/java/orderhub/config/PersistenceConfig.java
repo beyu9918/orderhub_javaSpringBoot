@@ -8,7 +8,7 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
 @Configuration
-@MapperScan("orderhub.mapper")
+@MapperScan(value="orderhub.mapper",nameGenerator=org.springframework.context.annotation.FullyQualifiedAnnotationBeanNameGenerator.class)
 public class PersistenceConfig {
     @Bean
     MybatisPlusInterceptor mybatisPlusInterceptor() {

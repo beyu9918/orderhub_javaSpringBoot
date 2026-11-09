@@ -7,6 +7,7 @@ RUN mvn -B -DskipTests package
 
 FROM eclipse-temurin:21-jre-jammy
 RUN groupadd --system orderhub && useradd --system --gid orderhub orderhub
+RUN mkdir -p /app/data/images && chown -R orderhub:orderhub /app/data
 WORKDIR /app
 COPY --from=build /workspace/target/orderhub-0.0.1-SNAPSHOT.jar app.jar
 USER orderhub

@@ -1,116 +1,151 @@
-# OrderHub 电商订单管理系统
+# OrderHub 电商订单与履约系统 V1
 
-Java 21 / Spring Boot 4.1.1 / PostgreSQL / MyBatis-Plus / Redis / Spring Security JWT / Docker Compose / OpenAPI。
+面向用户与运营管理端的 B2C 后端。Java 21 / Spring Boot 4.1.1 / Spring Security JWT / MyBatis-Plus / PostgreSQL / Redis / WebSocket / OpenAPI / Apache POI / Docker Compose。
 
-已实现用户注册与登录、管理员商品和库存管理、购物车、事务下单、历史订单分页、订单明细快照和取消归还库存。项目定位为个人后端练习，订单状态为 CREATED / CANCELLED，尚无支付、物流和退款集成。
+实现 18 张核心表及完整业务链：注册登录 → 地址 → 分类与 SPU/SKU → 购物车勾选 → 事务预占库存下单 → MOCK 支付 → 管理处理 → 多包裹发货 → 全部送达 → 确认收货。另有未付款超时取消、未发货退款、优惠券、审计、图片上传、Dashboard 和 Excel 报表。
 
-## 快速运行
+## 启动
 
-需要 Docker Desktop（Linux containers）或 Docker Engine + Compose。
+需要 Docker Desktop Linux containers / Docker Engine + Compose。本机 Java 运行时使用 JDK 21。
+
+已有 .env 可继续使用。没有时执行：
 
 ```powershell
 Copy-Item .env.example .env
-# 编辑 .env，替换数据库密码、JWT_SECRET（至少 32 字节）和管理员密码
+```
+
+编辑 .env：DB_PASSWORD 为数据库密码，JWT_SECRET 为至少 32 字节的随机签名密钥，ADMIN_USERNAME / ADMIN_PASSWORD 为首次创建的管理员账号密码，ADMIN_EMAIL 为邮箱。不要提交真实密钥到 Git。
+
+```powershell
 docker compose up --build -d
 docker compose logs -f app
 ```
 
-启动时 Flyway 自动迁移数据库。首次启动根据 ADMIN_USERNAME / ADMIN_PASSWORD 创建管理员，已有管理员不会被重设密码；若用户名已属于普通用户则启动失败，避免意外提权。注册接口始终创建 USER。
+- Swagger：<http://localhost:8080/swagger-ui.html>
+- OpenAPI：<http://localhost:8080/v3/api-docs>
+- 进程存活检查：<http://localhost:8080/api/health>
+- PostgreSQL / Redis 仅映射到本机 5432 / 6379；容器间通过服务名互通。
 
-- 健康检查：<http://localhost:8080/api/health>（进程存活，不代表依赖健康）
-- Swagger UI：<http://localhost:8080/swagger-ui.html>
-- OpenAPI JSON：<http://localhost:8080/v3/api-docs>
+数据库、Redis、图片保存在命名卷。docker compose down 保留数据。更换 JWT_SECRET 后执行 docker compose up -d --force-recreate app，已有 token 失效。已有数据库密码、管理员密码不会因为修改 .env 自动变更。
 
-PostgreSQL 和 Redis 只映射到本机，容器间使用服务名通信。数据保存在命名卷，`docker compose down` 保留数据。`.env` 已加入 Git 忽略，不要提交真实密钥。此 Compose 面向本地演示；公网部署应配置 HTTPS 和网络访问控制。
+本机 Java 运行时，先启动 docker compose up -d postgres redis，在终端设置 DB_PASSWORD、JWT_SECRET、ADMIN_USERNAME、ADMIN_PASSWORD，再执行 .\mvnw.cmd spring-boot:run。Java 不会自动加载 .env。
 
-## 本机 Java 运行
+## 从旧版升级
 
-先准备 PostgreSQL 和 Redis，也可只启动 Compose 的基础服务：
+Flyway 追加 V2、V3、V4，不改原 V1。旧六表数据保留，原库存表改名 legacy_inventory；新系统使用 18 张核心表。V3 将旧数据一次性导入新表并重设 identity 起点，旧商品变成一 SPU 一 SKU，旧 CREATED 订单映射 PENDING_PAYMENT，其已扣库存映射为预占库存。
 
-```powershell
-docker compose up -d postgres redis
-$env:DB_PASSWORD = '与 .env 中保持一致'
-$env:JWT_SECRET = '替换为至少32字节的随机密钥'
-$env:ADMIN_USERNAME = 'admin'
-$env:ADMIN_PASSWORD = '替换为管理员密码'
-.\mvnw.cmd spring-boot:run
+旧账号保留用户名与 BCrypt 密码，使用 /api/v1/.../auth/login 重新登录；邮箱暂为 legacy-<id>@legacy.invalid。旧订单保存原名称、价格与金额，未采集的收货地址不凭空补造。升级后的旧待付款订单也受 30 分钟超时取消规则约束。
+
+新版默认关闭旧 /api/auth、/api/products、/api/cart、/api/orders 接口，避免旧鉴权绕开新注销与禁用规则。旧代码和测试保留，开发对照时可单独设置 LEGACY_API_ENABLED=true。两套模型只在升级时导入一次，后续不双写，不要混用两套接口录入业务。
+
+## 手工测试
+
+完整请求示例见 [docs/requests.http](docs/requests.http)。Swagger 对应接口点击 Try it out，按次序执行并记录真实 ID：
+
+1. POST /api/v1/admin/auth/login，请求体 {"account":"admin","password":"你的管理员密码"}。Authorize 只填返回的 accessToken，不填 JWT_SECRET。
+2. 管理员创建分类 → 创建 SPU（DRAFT）→ 创建 SKU 及 initialStock → publish 商品。
+3. 注册普通用户并登录，Authorize 换为用户 token；创建收货地址。
+4. 按 skuId 添加购物车。修改、删除、勾选操作使用 itemId；重复 POST 累加数量，PUT 替换数量。
+5. 创建订单填写 addressId / 可选 userCouponId，添加 Idempotency-Key 请求头；只结算勾选条目。
+6. 创建支付尝试（method=MOCK）→ mock-success，检查订单 PAID。
+7. 换管理员 token：process → ship，记录 shipmentId → 更新物流 DELIVERED。
+8. 换用户 token：confirm-receipt，检查订单 COMPLETED、预占库存清零，查看状态历史、库存流水、审计和报表。
+
+异常分支：另建待付款订单再取消；另建已付款但未发货订单申请退款，再由管理员 approve / reject。发货后不支持直接退款。重复支付、取消、退款完成不会重复变更余额。
+
+## API 范围
+
+用户前缀 /api/v1/user，管理员前缀 /api/v1/admin，后者除登录外要求 ADMIN。完整 HTTP 方法和参数以 Swagger 为准。
+
+| 用户模块 | 路径 |
+| --- | --- |
+| 认证资料 | /auth/register、/auth/login、/auth/logout、/profile、/profile/password |
+| 地址 | /addresses、/addresses/{id}、/addresses/{id}/default |
+| 浏览 | /categories、/products、/products/{id}、/products/{id}/skus |
+| 购物车 | /cart、/cart/items、/cart/items/{itemId}、/cart/items/{itemId}/select、/cart/select-all |
+| 订单 | /orders、/orders/{orderId} 及 cancel / confirm-receipt / buy-again |
+| 支付 | /orders/{orderId}/payments、/payments/{paymentId}/mock-success、/mock-fail |
+| 物流 | /orders/{orderId}/shipment，返回包裹列表 |
+| 售后 | /orders/{orderId}/refunds、/refunds/{refundId}、/refunds/{refundId}/cancel |
+| 优惠券 | /coupons/available、/coupons/{couponId}/claim、/my-coupons |
+
+| 管理模块 | 路径 |
+| --- | --- |
+| 账号 | /auth/login、/auth/logout、/users、/admins 及 enable / disable |
+| 分类 | /categories 及 enable / disable |
+| 商品 SKU | /products、/products/{id} 及 publish / unpublish；/products/{productId}/skus、/skus/{skuId} |
+| 库存 | /inventory、/inventory/low-stock、/inventory/{skuId} 及 adjust / logs |
+| 订单物流 | /orders、/orders/{id} 及 process / ship / cancel / status-history / shipments；/shipments/{id}/status |
+| 退款 | /refunds、/refunds/{id} 及 approve / reject / complete |
+| 优惠券 | /coupons 及 enable / disable |
+| Dashboard | /dashboard/overview、/sales-trend、/order-trend、/order-status、/top-products、/low-stock |
+| 报表 | /reports/sales、/orders、/products、/export |
+| 图片 | POST /files/images（multipart 字段 file）、DELETE /files/{id} |
+| 审计 | /audit-logs、/audit-logs/{id} |
+
+商品筛选支持 keyword、categoryId、minPrice、maxPrice、page、size、sort；sort 为 newest / oldest / name / priceAsc / priceDesc。订单日期为带时区 ISO 时间；报表日期为 YYYY-MM-DD，按 UTC 自然日，默认最近 7 天、最多 366 天。分页每页最多 100 条。
+
+## 业务规则
+
+- 订单状态由 order/OrderService 统一控制：PENDING_PAYMENT → PAID → PROCESSING → SHIPPED → DELIVERED → COMPLETED；未付款可 CANCELLED。PAID / PROCESSING 可 REFUND_REQUESTED → REFUNDED，拒绝或撤销恢复原状态。
+- V1 全额 MOCK 退款在管理员同意时立即完成，refund.status=COMPLETED，complete 提供幂等重试。不接真实支付、退款、物流网关。
+- 运费统一为零。优惠券 FIXED 为减免金额，PERCENTAGE 为减免百分比，10 表示减免 10%。优惠不超过商品总额。已领取优惠券不能修改规则，只能启用/停用。
+- initialStock 仅创建 SKU 使用，编辑 SKU 不改库存。库存调整提交 quantity 增量、expectedVersion、reason；库存始终非负，保留可售与预占余额流水。
+- 每用户每种券只能领一次。库存预占、订单快照、状态日志、优惠券、购物车清理同事务。幂等键保存请求体指纹，新购买意图必须换键。
+- 每分钟处理一批最多 200 个过期订单或待完成订单：30 分钟未付款取消、全部包裹送达 7 天自动完成；AVAILABLE 券到期转 EXPIRED。
+- JWT 含账号 token_version，注销、改密码使该账号全部旧 token 失效，禁用立即拒绝旧 token。数据库为鉴权真相源，Redis 故障不影响撤销校验。密码不出现在响应或审计里。
+- 图片仅 PNG / JPEG，最大 5 MB、4096×4096；重编码为 PNG，以随机 UUID 命名，保存在本地卷。公开读取 /api/v1/images/{id}。
+
+## Redis 与 WebSocket
+
+Cache Aside：商品 product:{id}、SKU product:sku:{productId} TTL 30 分钟；管理修改提交后失效，结算直接读并锁数据库。Dashboard dashboard:overview TTL 1 分钟，订单变更提交后失效。product:hot ZSET 统计访问，auth:login:{userId} 记录登录版本与时间，order:idempotency:{userId}:{key} 缓存订单 ID 1 天。
+
+Redis 不可用时回退数据库。幂等仍有唯一约束和用户行锁保障。缓存为最终一致性，并发回填或失效失败时可保留至 TTL，不用于库存与结算判断。
+
+WebSocket 用户 /ws/orders（另有 /api/v1/user/ws/orders 别名），管理员 /ws/admin/orders。只在事务提交后推送，用户只接收本人订单，管理端要求 ADMIN。支持 Authorization Bearer 握手；浏览器用子协议携带 token：
+
+```javascript
+const socket = new WebSocket('ws://localhost:8080/ws/orders', [
+  'orderhub', 'bearer.' + accessToken
+]);
+socket.onmessage = event => console.log(JSON.parse(event.data));
 ```
 
-Maven Wrapper 会自动获取 Maven。macOS / Linux 使用 `./mvnw`。其他可选环境变量：DB_URL、DB_USERNAME、REDIS_HOST、REDIS_PORT、REDIS_PASSWORD、CACHE_ENABLED。启动本机 Java 时 `.env` 不会自动加载，需要设置环境变量。
+事件：ORDER_PAID / ORDER_PROCESSING / ORDER_SHIPPED / ORDER_DELIVERED / ORDER_COMPLETED / ORDER_CANCELLED / REFUND_APPROVED / REFUND_REJECTED。发送前重新校验 token。ALLOWED_ORIGINS 默认 localhost:8080 / 18080，可配置浏览器来源。发送字符串 ping，返回字符串 pong；不要把 token 放进 URL。
 
-## API
+通知是单实例在线推送，无离线重放；多实例分发、真实支付、退货物流属于后续扩展。HTTP 查询和数据库日志是可靠状态来源。
 
-| 方法 | 路径 | 权限与行为 |
-| --- | --- | --- |
-| POST | /api/auth/register | 公开，注册 USER |
-| POST | /api/auth/login | 公开，返回 JWT，有效期 2 小时 |
-| GET | /api/auth/me | 当前用户 |
-| GET | /api/products | 公开，page / size / category / keyword |
-| GET | /api/products/{id} | 公开，上架商品详情 |
-| GET / POST | /api/admin/products | ADMIN，查询全部 / 创建 |
-| PUT / DELETE | /api/admin/products/{id} | ADMIN，更新商品与库存 / 下架 |
-| GET / PUT | /api/admin/products/{id}/stock | ADMIN，读取 / 设置实时库存 |
-| GET / DELETE | /api/cart/items | 当前用户，查询 / 清空 |
-| PUT / DELETE | /api/cart/items/{productId} | 设置数量 / 删除 |
-| POST | /api/orders | 从当前购物车下单，请求体带 requestKey |
-| GET | /api/orders | 当前用户历史订单，page / size / status |
-| GET | /api/orders/{id} | 当前用户订单详情 |
-| POST | /api/orders/{id}/cancel | 取消并归还库存，幂等 |
-
-登录后在 Swagger 的 Authorize 输入 accessToken，或请求头传 `Authorization: Bearer <accessToken>`。成功结果直接返回对象或分页结构 `{page,size,total,records}`；校验错误 400、未认证 401、权限不足 403、不存在或非本人资源 404、冲突或库存不足 409。业务错误使用 ProblemDetail；Security 认证错误由框架返回 401 / 403。
-
-请求示例见 [docs/requests.http](docs/requests.http)，可使用 IDE HTTP Client 顺序执行。所有金额单位为人民币元，服务端根据数据库价格计算总额，客户端不传金额。
-
-## 一致性与缓存
-
-- 下单使用数据库事务、商品行锁及条件库存扣减，任一商品失败时整单回滚，保留购物车。
-- requestKey 在同一用户范围唯一；重复提交返回原订单，即使购物车已变化或订单已取消。新的购买意图必须使用新键；幂等键不允许复用。数据库唯一约束作为最终保障。
-- 订单保存购买时的名称、单价与小计，商品改名、改价、下架不影响历史。
-- Redis 缓存公开商品详情，TTL 60 秒；商品编辑或下架在事务提交后删除缓存。Redis 故障时降级查数据库。列表、库存及订单结算直接读数据库，避免使用缓存价格下单。
-- 缓存为最终一致性：并发读写或失效失败时，旧详情最多保留一个 TTL；不承诺管理操作后所有读取即时刷新。
-- JWT 使用 HS256 签名、发行者与过期时间校验，密码使用 BCrypt。无 token 撤销机制，角色改变需等待 token 到期；更换签名密钥会使已有 token 失效。
-
-数据库 ER 图、索引和 EXPLAIN 示例见 [docs/database.md](docs/database.md)。依赖版本按官方 [MyBatis-Plus Boot 4 安装说明](https://baomidou.com/en/getting-started/) 和 [springdoc 文档](https://springdoc.org/) 选择。
-
-## 测试
-
-本次实际构建、数据库、缓存与容器验证结果见 [docs/verification.md](docs/verification.md)。
+## 自动测试
 
 ```powershell
 .\mvnw.cmd test
+```
+
+执行旧版兼容测试和缓存单元测试，H2 PostgreSQL 模式不需要外部服务。新版 JSONB、锁、状态机、WebSocket、迁移和 Excel 使用真实 PostgreSQL / Redis：
+
+```powershell
+# 提前创建专用测试库，库名必须以 _test 结尾。
+$env:V1_TEST_DB_URL = 'jdbc:postgresql://localhost:5432/orderhub_v1_test'
+$env:V1_TEST_DB_USERNAME = 'orderhub'
+$env:V1_TEST_DB_PASSWORD = '测试数据库密码'
+$env:V1_TEST_REDIS_PORT = '6379'
+.\mvnw.cmd -Pv1-integration verify
+```
+
+V1 测试清空专用测试库的核心表，并在 Redis DB 1 清理测试缓存；不要连接业务库。没有合法 V1_TEST_DB_URL 时新版集成测试跳过，不应将跳过视为验证成功。
+
+代码按业务位于 orderhub.v1 的 auth、user、address、category、product、inventory、cart、order、payment、shipment、refund、coupon、report、audit、websocket、task 模块。原代码保留在原包。
+
+运行中服务可使用 `scripts/smoke-test.ps1` 做完整购买、取消和退款冒烟，需在终端设置 ADMIN_USERNAME / ADMIN_PASSWORD。脚本会创建测试数据并最终下架测试商品。
+
+若 Docker Hub 暂不可用，可以先用 Maven 打包，再以本机已有 Java 21 镜像构建运行镜像。示例中的基础镜像必须在本机存在：
+
+```powershell
 .\mvnw.cmd package
+docker build --pull=false --build-arg RUNTIME_IMAGE=orderhub-verify-app:latest -t orderhub-app -f Dockerfile.jar .
+docker compose up --no-build -d
 ```
 
-默认使用 H2 PostgreSQL 兼容模式，执行完整 Spring 上下文和 HTTP 集成测试，禁用 Redis 以便不依赖外部服务。覆盖注册登录、过期 token、角色权限、订单归属、分页参数、订单快照、库存不足回滚、并发防超卖、重复下单、重复取消和 OpenAPI。
+标准多阶段构建与本次运行镜像验证的区别，以及当前隔离演示入口，见 [V1 验证记录](docs/v1-verification.md)。需求对应代码见 [覆盖清单](docs/v1-coverage.md)。
 
-使用独立的 PostgreSQL **测试数据库**重复验证（测试会清空业务表，勿连接开发或生产数据库）：
-
-```powershell
-$env:TEST_DB_URL = 'jdbc:postgresql://localhost:5432/orderhub_test'
-$env:TEST_DB_USERNAME = 'orderhub'
-$env:TEST_DB_PASSWORD = '测试数据库密码'
-.\mvnw.cmd test
-```
-
-测试配置支持同一套用例切换数据库；H2 不能替代 PostgreSQL 的实际执行计划及部署验证。Redis 故障降级与提交后失效另有单元测试。
-
-运行中的服务也可执行冒烟测试（会创建测试用户、商品及已取消订单；商品最终下架）：
-
-```powershell
-$env:ADMIN_USERNAME = 'admin'
-$env:ADMIN_PASSWORD = '与部署时保持一致'
-.\scripts\smoke-test.ps1
-```
-
-## 目录
-
-```text
-src/main/java/orderhub/
-  api/          REST 接口、校验 DTO、响应和异常处理
-  config/       Security、OpenAPI、MyBatis-Plus、管理员初始化
-  domain/       数据库实体
-  mapper/       MyBatis-Plus CRUD 与加锁/库存 SQL
-  service/      事务业务与 Redis 缓存
-src/main/resources/db/migration/  Flyway DDL
-docs/           ER 图、SQL 分析与 HTTP 请求示例
-```
+设计与范围：[数据库 ER](docs/database.md)、[原始需求](docs/v1-requirements.md)。

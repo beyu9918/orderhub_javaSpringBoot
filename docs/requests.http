@@ -1,63 +1,161 @@
 @baseUrl = http://localhost:8080
-@adminToken = replace-with-admin-login-accessToken
-@userToken = replace-with-user-login-accessToken
+@adminToken = paste-admin-accessToken
+@userToken = paste-user-accessToken
+@categoryId = 1
 @productId = 1
+@skuId = 1
+@addressId = 1
 @orderId = 1
+@paymentId = 1
+@shipmentId = 1
+@refundId = 1
 
-### 1. 管理员登录，密码与环境变量一致
-POST {{baseUrl}}/api/auth/login
+### 1. 管理员登录，account / password 使用 .env 中的管理员账号密码
+POST {{baseUrl}}/api/v1/admin/auth/login
 Content-Type: application/json
 
-{"username":"admin","password":"replace-with-a-strong-admin-password"}
+{"account":"admin","password":"replace-with-a-strong-admin-password"}
 
-### 2. 使用管理员 accessToken 创建商品
-POST {{baseUrl}}/api/admin/products
+### 2. 复制 accessToken 到 adminToken，创建分类，记下 categoryId
+POST {{baseUrl}}/api/v1/admin/categories
 Authorization: Bearer {{adminToken}}
 Content-Type: application/json
 
-{"sku":"KEYBOARD-001","name":"机械键盘","description":"87 键机械键盘","category":"electronics","price":199.00,"active":true,"stock":20}
+{"name":"Electronics","parentId":null,"sortOrder":0}
 
-### 3. 用户注册
-POST {{baseUrl}}/api/auth/register
+### 3. 创建 SPU，初始为 DRAFT，记下 productId
+POST {{baseUrl}}/api/v1/admin/products
+Authorization: Bearer {{adminToken}}
 Content-Type: application/json
 
-{"username":"alice","password":"Alice-password-123!"}
+{"categoryId":{{categoryId}},"name":"机械键盘","description":"87 键机械键盘","brand":"OrderHub","imageUrl":null}
 
-### 4. 用户登录，将 accessToken 填入 userToken
-POST {{baseUrl}}/api/auth/login
+### 4. 创建 SKU 及初始库存，记下 skuId
+POST {{baseUrl}}/api/v1/admin/products/{{productId}}/skus
+Authorization: Bearer {{adminToken}}
 Content-Type: application/json
 
-{"username":"alice","password":"Alice-password-123!"}
+{"skuCode":"KEYBOARD-BLACK-001","attributes":{"color":"Black","switch":"Brown"},"price":199.00,"status":"ACTIVE","initialStock":20}
 
-### 5. 商品查询
-GET {{baseUrl}}/api/products?page=1&size=20&category=electronics
+### 5. 上架 SPU
+PUT {{baseUrl}}/api/v1/admin/products/{{productId}}/publish
+Authorization: Bearer {{adminToken}}
 
-### 6. 设置购物车商品数量
-PUT {{baseUrl}}/api/cart/items/{{productId}}
+### 6. 普通用户注册
+POST {{baseUrl}}/api/v1/user/auth/register
+Content-Type: application/json
+
+{"email":"alice@example.com","username":"alice","password":"Alice-password-123!","phone":"13800138000"}
+
+### 7. 用户登录，复制 accessToken 到 userToken
+POST {{baseUrl}}/api/v1/user/auth/login
+Content-Type: application/json
+
+{"account":"alice@example.com","password":"Alice-password-123!"}
+
+### 8. 默认收货地址，记下 addressId
+POST {{baseUrl}}/api/v1/user/addresses
 Authorization: Bearer {{userToken}}
 Content-Type: application/json
 
-{"quantity":2}
+{"receiverName":"Alice","phone":"13800138000","province":"上海市","city":"上海市","district":"浦东新区","detailAddress":"示例路 1 号","postalCode":"200000","isDefault":true}
 
-### 7. 下单（重试使用同一 requestKey，新订单使用新键）
-POST {{baseUrl}}/api/orders
+### 9. 商品查询，支持 newest / oldest / name / priceAsc / priceDesc
+GET {{baseUrl}}/api/v1/user/products?page=1&size=20&sort=priceAsc&minPrice=100&maxPrice=500
+
+### 10. 添加 SKU 到购物车，重复 POST 累加数量
+POST {{baseUrl}}/api/v1/user/cart/items
 Authorization: Bearer {{userToken}}
 Content-Type: application/json
 
-{"requestKey":"alice-checkout-0001"}
+{"skuId":{{skuId}},"quantity":2}
 
-### 8. 历史订单
-GET {{baseUrl}}/api/orders?page=1&size=20&status=CREATED
+### 11. 查看购物车；修改/删除/勾选用 item.id，而非 skuId
+GET {{baseUrl}}/api/v1/user/cart
 Authorization: Bearer {{userToken}}
 
-### 9. 订单明细
-GET {{baseUrl}}/api/orders/{{orderId}}
+### 12. 下单，仅结算 selected=true；重试保持同一键，新订单换键
+POST {{baseUrl}}/api/v1/user/orders
+Authorization: Bearer {{userToken}}
+Idempotency-Key: alice-checkout-0001
+Content-Type: application/json
+
+{"addressId":{{addressId}},"userCouponId":null,"remark":"测试订单"}
+
+### 13. 创建 MOCK 支付，记下 paymentId
+POST {{baseUrl}}/api/v1/user/orders/{{orderId}}/payments
+Authorization: Bearer {{userToken}}
+Content-Type: application/json
+
+{"method":"MOCK"}
+
+### 14. 模拟支付成功；失败可调用 mock-fail，再创建新支付尝试
+POST {{baseUrl}}/api/v1/user/payments/{{paymentId}}/mock-success
 Authorization: Bearer {{userToken}}
 
-### 10. 取消订单
-POST {{baseUrl}}/api/orders/{{orderId}}/cancel
+### 15. 管理员确认处理
+POST {{baseUrl}}/api/v1/admin/orders/{{orderId}}/process
+Authorization: Bearer {{adminToken}}
+
+### 16. 发货，记下 shipmentId；运输中可通过 /shipments 添加其他包裹
+POST {{baseUrl}}/api/v1/admin/orders/{{orderId}}/ship
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{"carrier":"MOCK","trackingNumber":"TRACK-0001"}
+
+### 17. 模拟送达，中间可先设置 IN_TRANSIT
+PUT {{baseUrl}}/api/v1/admin/shipments/{{shipmentId}}/status
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{"status":"DELIVERED"}
+
+### 18. 全部包裹送达后确认收货
+POST {{baseUrl}}/api/v1/user/orders/{{orderId}}/confirm-receipt
 Authorization: Bearer {{userToken}}
 
-### 11. 查询实时库存
-GET {{baseUrl}}/api/admin/products/{{productId}}/stock
+### 19. 历史订单
+GET {{baseUrl}}/api/v1/user/orders?page=1&size=20&status=COMPLETED
+Authorization: Bearer {{userToken}}
+
+### 20. 订单状态历史
+GET {{baseUrl}}/api/v1/admin/orders/{{orderId}}/status-history
+Authorization: Bearer {{adminToken}}
+
+### 21. 当前可售、预占库存和 version
+GET {{baseUrl}}/api/v1/admin/inventory/{{skuId}}
+Authorization: Bearer {{adminToken}}
+
+### 分支 A：另建未付款订单，取消释放库存
+POST {{baseUrl}}/api/v1/user/orders/{{orderId}}/cancel
+Authorization: Bearer {{userToken}}
+Content-Type: application/json
+
+{"reason":"不需要了"}
+
+### 分支 B：另建 PAID / PROCESSING 订单，申请退款，记下 refundId
+POST {{baseUrl}}/api/v1/user/orders/{{orderId}}/refunds
+Authorization: Bearer {{userToken}}
+Content-Type: application/json
+
+{"reason":"申请未发货退款"}
+
+### 同意后 MOCK 退款立即完成，重复调用不重复归还库存
+POST {{baseUrl}}/api/v1/admin/refunds/{{refundId}}/approve
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{"reason":"审核通过"}
+
+### Dashboard，按 UTC 自然日统计
+GET {{baseUrl}}/api/v1/admin/dashboard/overview
+Authorization: Bearer {{adminToken}}
+
+### Excel 导出，日期 YYYY-MM-DD，可省略使用最近 7 天
+GET {{baseUrl}}/api/v1/admin/reports/export
+Authorization: Bearer {{adminToken}}
+
+### 审计日志
+GET {{baseUrl}}/api/v1/admin/audit-logs?page=1&size=20
 Authorization: Bearer {{adminToken}}

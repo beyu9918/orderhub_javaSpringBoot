@@ -37,7 +37,12 @@ services:
       REDIS_HOST: redis
       JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env (at least 32 bytes)}
       ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@orderhub.local}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:?Set ADMIN_PASSWORD in .env}
+      FILES_DIRECTORY: /app/data/images
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:8080,http://localhost:18080}
+    volumes:
+      - image-data:/app/data
     depends_on:
       postgres:
         condition: service_healthy
@@ -47,3 +52,4 @@ services:
 volumes:
   postgres-data:
   redis-data:
+  image-data:
