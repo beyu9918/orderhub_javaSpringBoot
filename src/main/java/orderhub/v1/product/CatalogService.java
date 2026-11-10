@@ -11,6 +11,7 @@ import orderhub.v1.category.mapper.CategoryMapper;
 import orderhub.v1.common.*;
 import orderhub.v1.product.entity.*;
 import orderhub.v1.product.mapper.*;
+import orderhub.v1.product.cache.ProductDetailCache;
 import orderhub.v1.inventory.InventoryService;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -21,8 +22,10 @@ public class CatalogService {
     public record SkuList(List<Sku> skus){}
     private final CategoryMapper categories;private final ProductMapper products;private final SkuMapper skus;
     private final InventoryService inventory;private final AuditService audit;private final CommerceCache cache;
-    public CatalogService(CategoryMapper categories,ProductMapper products,SkuMapper skus,InventoryService inventory,AuditService audit,CommerceCache cache){
+    private final ProductDetailCache details;
+    public CatalogService(CategoryMapper categories,ProductMapper products,SkuMapper skus,InventoryService inventory,AuditService audit,CommerceCache cache,ProductDetailCache details){
         this.categories=categories;this.products=products;this.skus=skus;this.inventory=inventory;this.audit=audit;this.cache=cache;
+        this.details=details;
     }
     public List<Category> categories(boolean admin){
         List<Category> all=categories.selectList(new QueryWrapper<Category>().orderByAsc("sort_order","id"));
@@ -57,10 +60,11 @@ public class CatalogService {
     }
     public ProductDetail detail(long id,boolean admin){
         if(admin)return new ProductDetail(Db.require(products.selectById(id)),skus.selectList(new QueryWrapper<Sku>().eq("product_id",id).orderByAsc("id")));
-        ProductDetail detail=cache.remember("product:"+id,ProductDetail.class,Duration.ofMinutes(30),()->{
-            Product p=Db.require(products.selectById(id));if(!"ACTIVE".equals(p.status))throw ApiException.missing("商品未上架");
+        ProductDetail detail=details.get(id,ProductDetail.class,()->{
+            Product p=products.selectById(id);if(p==null||!"ACTIVE".equals(p.status))return null;
             return new ProductDetail(p,skus.selectList(new QueryWrapper<Sku>().eq("product_id",id).eq("status","ACTIVE").orderByAsc("id")));
         });
+        if(detail==null)throw ApiException.missing("商品不存在或未上架");
         if(!categoryActive(detail.product.categoryId))throw ApiException.missing("商品分类未启用");
         cache.viewed(id);return detail;
     }

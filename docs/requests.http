@@ -159,3 +159,18 @@ Authorization: Bearer {{adminToken}}
 ### 审计日志
 GET {{baseUrl}}/api/v1/admin/audit-logs?page=1&size=20
 Authorization: Bearer {{adminToken}}
+
+### 限量优惠券：创建后将返回的 id 填入下面 URL，时间需改为当前有效区间
+POST {{baseUrl}}/api/v1/admin/coupons
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{"code":"LIMITED-COUPON-001","name":"限量满减券","discountType":"FIXED","discountValue":10.00,"minimumAmount":100.00,"totalQuantity":5,"startAt":"2026-11-01T00:00:00Z","expireAt":"2026-12-01T00:00:00Z"}
+
+### 同一用户重试返回原领取记录，换不同用户 token 验证限量；无需请求体
+POST {{baseUrl}}/api/v1/user/coupons/1/claim
+Authorization: Bearer {{userToken}}
+
+### 查询已领取的优惠券
+GET {{baseUrl}}/api/v1/user/my-coupons
+Authorization: Bearer {{userToken}}

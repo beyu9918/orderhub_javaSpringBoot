@@ -22,6 +22,16 @@ import orderhub.v1.common.*;
 import orderhub.v1.coupon.*;
 import orderhub.v1.coupon.entity.*;
 import orderhub.v1.coupon.mapper.*;
+import orderhub.v1.coupon.claim.*;
+import orderhub.v1.product.cache.*;
+import org.redisson.Redisson;
+import org.redisson.api.RedissonClient;
+import org.redisson.config.Config;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.support.StaticListableBeanFactory;
+import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
+import java.util.concurrent.atomic.AtomicInteger;
+import static org.mockito.Mockito.*;
 import orderhub.v1.inventory.InventoryService;
 import orderhub.v1.order.*;
 import orderhub.v1.order.entity.PurchaseOrder;
@@ -68,8 +78,13 @@ class V1CommerceIT {
     @Autowired MockMvc mvc;@Autowired JsonMapper json;@Autowired JdbcTemplate jdbc;@Autowired DataSource dataSource;
     @Autowired AuthService auth;@Autowired AddressService addresses;@Autowired CatalogService catalog;@Autowired InventoryService inventory;
     @Autowired CartService carts;@Autowired OrderService orders;@Autowired CouponService coupons;@Autowired ReportService reports;
-    @Autowired PurchaseOrderMapper orderRows;@Autowired UserCouponMapper userCoupons;@Autowired StringRedisTemplate redis;
+    @Autowired PurchaseOrderMapper orderRows;@MockitoSpyBean UserCouponMapper userCoupons;@Autowired StringRedisTemplate redis;
     @Autowired ApplicationEventPublisher events;@Autowired PlatformTransactionManager transactions;
+    @Autowired ProductDetailCache detailCache;@Autowired ProductCacheProperties cacheSettings;
+    @Autowired CouponClaimGate claimGate;@Autowired CouponClaimCoordinator claimCoordinator;
+    @Autowired ObjectProvider<RedissonClient> redisson;
+    @MockitoSpyBean CouponClaimStore claimStore;
+    @MockitoSpyBean orderhub.v1.product.mapper.ProductMapper productRows;
     @LocalServerPort int port;
     Actor admin;String adminToken;
     record Shopper(Actor actor,String token,long address){}
@@ -80,6 +95,7 @@ class V1CommerceIT {
         adminToken=auth.login(new AuthDtos.Login("admin","Admin-Test-123!"),true).accessToken();
         Set<String> keys=redis.keys("product:*");if(keys!=null&&!keys.isEmpty())redis.delete(keys);
         keys=redis.keys("order:idempotency:*");if(keys!=null&&!keys.isEmpty())redis.delete(keys);redis.delete("dashboard:overview");
+        for(String pattern:List.of("coupon:*","user:coupon:*")){keys=redis.keys(pattern);if(keys!=null&&!keys.isEmpty())redis.delete(keys);}
     }
     @Test void completePurchaseAndAuthenticatedWebSocket() throws Exception {
         Shopper u=shopper("alice");long sku=sku("49.90",10);carts.add(u.actor.id(),sku,2);
@@ -256,6 +272,135 @@ class V1CommerceIT {
             assertThat(jdbc.queryForObject("SELECT status FROM "+schema+".orders WHERE id=30",String.class)).isEqualTo("PENDING_PAYMENT");
             assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM "+schema+".app_user",Long.class)).isEqualTo(1);
         }finally{jdbc.execute("DROP SCHEMA "+schema+" CASCADE");}
+    }
+    @Test void productNegativeCachingAvoidsRepeatedSqlAndCreateInvalidatesIt() throws Exception {
+        clearInvocations(productRows);
+        for(int i=0;i<5;i++)api("GET","/api/v1/user/products/900000",null,null,404,null);
+        verify(productRows,times(1)).selectById(900000L);
+        assertThat(redis.opsForValue().get("product:900000")).isEqualTo(ProductDetailCache.NOT_FOUND);
+        assertThat(redis.getExpire("product:900000",TimeUnit.MILLISECONDS)).isBetween(58000L,75000L);
+        api("GET","/api/v1/user/products/1",null,null,404,null);
+        long sku=sku("10",10);long product=jdbc.queryForObject("SELECT product_id FROM product_skus WHERE id=?",Long.class,sku);
+        assertThat(product).isEqualTo(1);api("GET","/api/v1/user/products/1",null,null,200,null);
+        assertThat(redis.opsForValue().get("product:1")).isNotEqualTo(ProductDetailCache.NOT_FOUND);
+    }
+    @Test void productHotKeyRebuildIsSharedAcrossIndependentCacheInstances() throws Exception {
+        var other=new ProductDetailCache(redis,json,cacheSettings,true);AtomicInteger loads=new AtomicInteger();
+        var results=parallel(24,i->(i%2==0?detailCache:other).get(800001,String.class,()->{
+            loads.incrementAndGet();try{Thread.sleep(120);}catch(InterruptedException e){Thread.currentThread().interrupt();throw new IllegalStateException(e);}return "value";
+        }));
+        assertThat(results).allMatch("value"::equals);assertThat(loads).hasValue(1);
+        assertThat(redis.getExpire("product:800001",TimeUnit.MILLISECONDS)).isBetween(1798000L,2100000L);
+        assertThat(redis.hasKey("product:lock:800001")).isFalse();
+    }
+    @Test void expiredCacheOwnerCannotPublishOrUnlockSuccessor(){
+        String value=detailCache.get(800002,String.class,()->{
+            redis.opsForValue().set("product:lock:800002","successor",Duration.ofSeconds(10));return "old";
+        });
+        assertThat(value).isEqualTo("old");assertThat(redis.hasKey("product:800002")).isFalse();
+        assertThat(redis.opsForValue().get("product:lock:800002")).isEqualTo("successor");
+    }
+    @Test void luaAtomicallyLimitsStockAndDoesNotReplaceDuplicateReservation() throws Exception {
+        Coupon c=coupon("FIXED","1",5);warm(c.id);String generation=claimGate.generation(c.id);
+        var results=parallel(32,i->claimGate.reserve(new CouponClaimGate.Reservation(c.id,1000+i,generation,"token-"+i)));
+        assertThat(results.stream().filter(x->x.equals(CouponClaimGate.RESERVED)).count()).isEqualTo(5);
+        assertThat(results.stream().filter(x->x.equals(CouponClaimGate.SOLD_OUT)).count()).isEqualTo(27);
+        assertThat(redis.opsForValue().get(claimGate.keys(c.id).get(1))).isEqualTo("0");
+        int winner=results.indexOf(CouponClaimGate.RESERVED);
+        assertThat(claimGate.reserve(new CouponClaimGate.Reservation(c.id,1000+winner,generation,"replacement"))).isEqualTo(CouponClaimGate.DUPLICATE);
+        assertThat(claimGate.pending(c.id,1000+winner).token()).isEqualTo("token-"+winner);
+    }
+    @Test void twoRedissonClientsSerializeSameUserAndDoNotOversellAcrossUsers() throws Exception {
+        Shopper same=shopper("same_user");Coupon c=coupon("FIXED","1",3);
+        RedissonClient second=Redisson.create(new Config(redisson.getObject().getConfig()));
+        try {
+            StaticListableBeanFactory beans=new StaticListableBeanFactory();beans.addBean("redisson",second);
+            var other=new CouponClaimCoordinator(claimStore,claimGate,beans.getBeanProvider(RedissonClient.class),true,Duration.ofSeconds(2));
+            var sameResults=parallel(12,i->(i%2==0?claimCoordinator:other).claim(same.actor.id(),c.id));
+            long owned=((UserCoupon)sameResults.getFirst()).id;
+            assertThat(sameResults).allMatch(x->((UserCoupon)x).id.equals(owned));
+            List<Long> ids=new ArrayList<>();for(int i=0;i<12;i++)ids.add(shopper("buyer_"+i).actor.id());
+            var results=parallel(12,i->{try{return (i%2==0?claimCoordinator:other).claim(ids.get(i),c.id);}catch(ApiException e){return e;}});
+            assertThat(results.stream().filter(UserCoupon.class::isInstance).count()).isEqualTo(2);
+            assertThat(jdbc.queryForObject("SELECT claimed_quantity FROM coupons WHERE id=?",Integer.class,c.id)).isEqualTo(3);
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM user_coupons WHERE coupon_id=?",Integer.class,c.id)).isEqualTo(3);
+            assertThat(redis.opsForValue().get(claimGate.keys(c.id).get(1))).isEqualTo("0");
+        }finally{second.shutdown();}
+    }
+    @Test void databaseFailureAfterLuaCompensatesAndCanBeRetried(){
+        Shopper u=shopper("alice");Coupon c=coupon("FIXED","1",1);
+        doThrow(new IllegalStateException("forced DB failure")).when(claimStore).claim(u.actor.id(),c.id);
+        assertThatThrownBy(()->coupons.claim(u.actor.id(),c.id)).isInstanceOf(IllegalStateException.class).hasMessage("forced DB failure");
+        assertThat(jdbc.queryForObject("SELECT claimed_quantity FROM coupons WHERE id=?",Integer.class,c.id)).isZero();
+        assertThat(claimGate.generation(c.id)).isNull();
+        doCallRealMethod().when(claimStore).claim(u.actor.id(),c.id);
+        assertThat(coupons.claim(u.actor.id(),c.id)).isNotNull();
+        assertThat(redis.opsForValue().get(claimGate.keys(c.id).get(1))).isEqualTo("0");
+    }
+    @Test void insertFailureRollsBackDatabaseCounterAndRedisReservation(){
+        Shopper u=shopper("alice");Coupon c=coupon("FIXED","1",1);
+        doThrow(new org.springframework.dao.DataIntegrityViolationException("forced insert failure"))
+            .when(userCoupons).insert(any(UserCoupon.class));
+        assertThatThrownBy(()->coupons.claim(u.actor.id(),c.id)).isInstanceOf(org.springframework.dao.DataIntegrityViolationException.class);
+        assertThat(jdbc.queryForObject("SELECT claimed_quantity FROM coupons WHERE id=?",Integer.class,c.id)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM user_coupons WHERE coupon_id=?",Integer.class,c.id)).isZero();
+        assertThat(claimGate.generation(c.id)).isNull();org.mockito.Mockito.reset(userCoupons);
+        assertThat(coupons.claim(u.actor.id(),c.id)).isNotNull();
+        assertThat(jdbc.queryForObject("SELECT claimed_quantity FROM coupons WHERE id=?",Integer.class,c.id)).isEqualTo(1);
+    }
+    @Test void redissonOutageFallsBackToDatabaseAndInvalidatesOldGate(){
+        Shopper u=shopper("alice");Coupon c=coupon("FIXED","1",1);warm(c.id);
+        @SuppressWarnings("unchecked") ObjectProvider<RedissonClient> unavailable=mock(ObjectProvider.class);
+        when(unavailable.getObject()).thenThrow(new IllegalStateException("Redis unavailable"));
+        var fallback=new CouponClaimCoordinator(claimStore,claimGate,unavailable,true,Duration.ofSeconds(2));
+        long id=fallback.claim(u.actor.id(),c.id).id;
+        assertThat(fallback.claim(u.actor.id(),c.id).id).isEqualTo(id);assertThat(claimGate.generation(c.id)).isNull();
+        Shopper other=shopper("bob");assertThatThrownBy(()->coupons.claim(other.actor.id(),c.id)).isInstanceOf(ApiException.class);
+        assertThat(jdbc.queryForObject("SELECT claimed_quantity FROM coupons WHERE id=?",Integer.class,c.id)).isEqualTo(1);
+    }
+    @Test void abandonedReservationIsRecoveredButAnActiveOwnerIsNotTouched() throws Exception {
+        Shopper u=shopper("alice");Coupon c=coupon("FIXED","1",1);warm(c.id);
+        var r=new CouponClaimGate.Reservation(c.id,u.actor.id(),claimGate.generation(c.id),"abandoned");
+        assertThat(claimGate.reserve(r)).isEqualTo(CouponClaimGate.RESERVED);expireReservation(r);
+        try(var executor=Executors.newSingleThreadExecutor()){
+            CountDownLatch ready=new CountDownLatch(1),release=new CountDownLatch(1);
+            Future<?> owner=executor.submit(()->{var lock=redisson.getObject().getLock(CouponClaimCoordinator.lockKey(c.id,u.actor.id()));lock.lock();try{ready.countDown();release.await();}catch(InterruptedException e){Thread.currentThread().interrupt();}finally{lock.unlock();}});
+            assertThat(ready.await(5,TimeUnit.SECONDS)).isTrue();
+            try{claimCoordinator.recoverExpired();assertThat(redis.opsForValue().get(claimGate.keys(c.id).get(1))).isEqualTo("0");}
+            finally{release.countDown();}
+            owner.get(5,TimeUnit.SECONDS);
+        }
+        claimCoordinator.recoverExpired();
+        assertThat(redis.opsForValue().get(claimGate.keys(c.id).get(1))).isEqualTo("1");assertThat(claimGate.pending(c.id,u.actor.id())).isNull();
+        assertThat(coupons.claim(u.actor.id(),c.id)).isNotNull();
+    }
+    @Test void committedReservationRecoveryDoesNotRestoreStockAndStaleTokensCannotCompensate(){
+        Shopper u=shopper("alice");Coupon c=coupon("FIXED","1",1);warm(c.id);
+        var r=new CouponClaimGate.Reservation(c.id,u.actor.id(),claimGate.generation(c.id),"committed");
+        claimGate.reserve(r);claimStore.claim(u.actor.id(),c.id);expireReservation(r);claimCoordinator.recoverExpired();
+        assertThat(redis.opsForValue().get(claimGate.keys(c.id).get(1))).isEqualTo("0");assertThat(claimGate.pending(c.id,u.actor.id())).isNull();
+        assertThat(claimGate.finish(r,false)).isTrue();assertThat(redis.opsForValue().get(claimGate.keys(c.id).get(1))).isEqualTo("0");
+        claimCoordinator.invalidate(c.id);warm(c.id);
+        assertThat(claimGate.finish(r,false)).isFalse();assertThat(redis.opsForValue().get(claimGate.keys(c.id).get(1))).isEqualTo("0");
+        assertThat(redis.opsForSet().isMember(claimGate.keys(c.id).get(2),u.actor.id().toString())).isTrue();
+    }
+    @Test void administrativeChangeFencesStaleInitializationAndInvalidatesGate(){
+        Shopper u=shopper("alice");Coupon c=coupon("FIXED","1",2);
+        String oldEpoch=claimGate.epoch(c.id);var snapshot=claimStore.snapshot(c.id);
+        coupons.status(admin,c.id,false);claimGate.initialize(snapshot,oldEpoch);
+        assertThat(claimGate.generation(c.id)).isNull();
+        assertThatThrownBy(()->coupons.claim(u.actor.id(),c.id)).isInstanceOf(ApiException.class);
+        coupons.status(admin,c.id,true);assertThat(coupons.claim(u.actor.id(),c.id)).isNotNull();
+    }
+    private void warm(long coupon){String epoch=claimGate.epoch(coupon);claimGate.initialize(claimStore.snapshot(coupon),epoch);}
+    private void expireReservation(CouponClaimGate.Reservation r){redis.opsForZSet().add(claimGate.keys(r.coupon()).get(4),Long.toString(r.user()),System.currentTimeMillis()-1);}
+    private List<Object> parallel(int count,java.util.function.IntFunction<Object> work) throws Exception {
+        try(var executor=Executors.newFixedThreadPool(count)){
+            var ready=new CountDownLatch(count);var start=new CountDownLatch(1);List<Future<Object>> results=new ArrayList<>();
+            for(int i=0;i<count;i++){int index=i;results.add(executor.submit(()->{ready.countDown();start.await();return work.apply(index);}));}
+            assertThat(ready.await(5,TimeUnit.SECONDS)).isTrue();start.countDown();List<Object> values=new ArrayList<>();
+            for(Future<Object> result:results)values.add(result.get(20,TimeUnit.SECONDS));return values;
+        }
     }
     private Shopper shopper(String name){var u=auth.register(new AuthDtos.Register(name+"@test.local",name,"Password-123!",null),"USER",Actor.system());long address=addresses.save(u.id,null,address(true)).id;return new Shopper(new Actor(u.id,"USER"),auth.login(new AuthDtos.Login(name,"Password-123!"),false).accessToken(),address);}
     private AddressInput address(boolean def){return new AddressInput("Alice","13800138000","Shanghai","Shanghai","Pudong","Test road 1","200000",def);}

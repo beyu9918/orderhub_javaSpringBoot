@@ -8,6 +8,8 @@ import orderhub.v1.audit.AuditService;
 import orderhub.v1.common.*;
 import orderhub.v1.coupon.entity.*;
 import orderhub.v1.coupon.mapper.*;
+import orderhub.v1.coupon.claim.CouponClaimCoordinator;
+import orderhub.v1.common.CommerceCache;
 import orderhub.v1.user.mapper.AccountMapper;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -15,16 +17,11 @@ import org.springframework.transaction.annotation.Transactional;
 @Service
 public class CouponService {
     private final CouponMapper coupons;private final UserCouponMapper owned;private final AccountMapper users;private final AuditService audit;
-    public CouponService(CouponMapper coupons,UserCouponMapper owned,AccountMapper users,AuditService audit){this.coupons=coupons;this.owned=owned;this.users=users;this.audit=audit;}
+    private final CouponClaimCoordinator claims;private final CommerceCache cache;
+    public CouponService(CouponMapper coupons,UserCouponMapper owned,AccountMapper users,AuditService audit,CouponClaimCoordinator claims,CommerceCache cache){this.coupons=coupons;this.owned=owned;this.users=users;this.audit=audit;this.claims=claims;this.cache=cache;}
     public List<Coupon> available(){return coupons.selectList(new QueryWrapper<Coupon>().eq("status","ACTIVE").le("start_at",Db.now()).gt("expire_at",Db.now()).apply("claimed_quantity < total_quantity").orderByDesc("id"));}
     public List<UserCoupon> mine(long user){return owned.selectList(new QueryWrapper<UserCoupon>().eq("user_id",user).orderByDesc("id"));}
-    @Transactional public UserCoupon claim(long user,long id){
-        Db.lock(users,user);Coupon c=Db.lock(coupons,id);
-        UserCoupon existing=owned.selectOne(new QueryWrapper<UserCoupon>().eq("user_id",user).eq("coupon_id",id));if(existing!=null)return existing;
-        Db.check("ACTIVE".equals(c.status)&&!c.startAt.isAfter(Db.now())&&c.expireAt.isAfter(Db.now()),"优惠券不在可领取时段");
-        int changed=coupons.update(null,new UpdateWrapper<Coupon>().eq("id",id).apply("claimed_quantity < total_quantity").setSql("claimed_quantity = claimed_quantity + 1"));
-        Db.check(changed==1,"优惠券已领完");UserCoupon uc=new UserCoupon();uc.userId=user;uc.couponId=id;uc.status="AVAILABLE";uc.expireAt=c.expireAt;owned.insert(uc);return owned.selectById(uc.id);
-    }
+    public UserCoupon claim(long user,long id){return claims.claim(user,id);}
     public BigDecimal discount(long user,Long userCouponId,BigDecimal subtotal){
         if(userCouponId==null)return BigDecimal.ZERO.setScale(2);
         UserCoupon uc=Db.lock(owned,userCouponId);Db.check(uc.userId==user&&"AVAILABLE".equals(uc.status)&&uc.expireAt.isAfter(Db.now()),"优惠券不可用");
@@ -46,8 +43,8 @@ public class CouponService {
         if(id!=null){Db.check(c.claimedQuantity==0,"已领取的优惠券不可编辑，只能启用或停用");}
         c.code=in.code();c.name=in.name();c.discountType=in.discountType();c.discountValue=in.discountValue();c.minimumAmount=in.minimumAmount();c.totalQuantity=in.totalQuantity();c.startAt=in.startAt();c.expireAt=in.expireAt();
         if(id==null){c.status="ACTIVE";c.claimedQuantity=0;coupons.insert(c);}else coupons.updateById(c);
-        audit.record(actor,"SAVE_COUPON","COUPON",c.id,before,c);return coupons.selectById(c.id);
+        audit.record(actor,"SAVE_COUPON","COUPON",c.id,before,c);long couponId=c.id;cache.afterCommit(()->claims.invalidate(couponId));return coupons.selectById(c.id);
     }
-    @Transactional public void status(Actor actor,long id,boolean enabled){Coupon c=Db.lock(coupons,id);var before=JsonbHandler.object(c);c.status=enabled?"ACTIVE":"INACTIVE";coupons.updateById(c);audit.record(actor,"COUPON_STATUS","COUPON",id,before,c);}
+    @Transactional public void status(Actor actor,long id,boolean enabled){Coupon c=Db.lock(coupons,id);var before=JsonbHandler.object(c);c.status=enabled?"ACTIVE":"INACTIVE";coupons.updateById(c);audit.record(actor,"COUPON_STATUS","COUPON",id,before,c);cache.afterCommit(()->claims.invalidate(id));}
     @Transactional public int expire(){return owned.update(null,new UpdateWrapper<UserCoupon>().eq("status","AVAILABLE").le("expire_at",Db.now()).set("status","EXPIRED"));}
 }

@@ -98,7 +98,9 @@ Flyway 追加 V2、V3、V4，不改原 V1。旧六表数据保留，原库存表
 
 ## Redis 与 WebSocket
 
-Cache Aside：商品 product:{id}、SKU product:sku:{productId} TTL 30 分钟；管理修改提交后失效，结算直接读并锁数据库。Dashboard dashboard:overview TTL 1 分钟，订单变更提交后失效。product:hot ZSET 统计访问，auth:login:{userId} 记录登录版本与时间，order:idempotency:{userId}:{key} 缓存订单 ID 1 天。
+商品详情缓存增加空值缓存（60–75 秒）、互斥重建与随机 TTL（30–35 分钟），等待重建最多 2 秒；SKU 列表继续缓存 30 分钟。管理修改提交后失效，结算直接读并锁数据库。Dashboard dashboard:overview TTL 1 分钟，订单变更提交后失效。product:hot ZSET 统计访问，auth:login:{userId} 记录登录版本与时间，order:idempotency:{userId}:{key} 缓存订单 ID 1 天。
+
+限量优惠券领取增加 Redisson 用户级分布式锁，以及 Lua 原子检查活动、名额、重复领取并预扣；随后同步提交 PostgreSQL 事务。数据库失败补偿，进程中断的预扣由恢复任务或用户重试核对。Redis 故障仍走原数据库兜底，库存方案保持数据库事务与版本控制。配置、失败路径、Redis key 和面试讲解见 [Redis 并发设计](docs/redis-concurrency.md)。
 
 Redis 不可用时回退数据库。幂等仍有唯一约束和用户行锁保障。缓存为最终一致性，并发回填或失效失败时可保留至 TTL，不用于库存与结算判断。
 
